@@ -165,6 +165,8 @@ select option{background:#fff}
 .confetti-wrap{position:absolute;inset:0;pointer-events:none;overflow:hidden;border-radius:12px}
 .dot{position:absolute;width:5px;height:5px;border-radius:50%;animation:pop .7s ease forwards}
 @keyframes pop{0%{opacity:1;transform:translateY(0) scale(1)}100%{opacity:0;transform:translateY(-50px) scale(0.3)}}
+@keyframes pulse-red{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.4)}50%{box-shadow:0 0 0 4px rgba(239,68,68,0)}}
+@keyframes pulse-amber{0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,.4)}50%{box-shadow:0 0 0 4px rgba(245,158,11,0)}}
 
 /* FEEDBACK */
 .fb-card{background:#fff;border:1px solid var(--border);border-radius:12px;padding:1.25rem;margin-bottom:10px;box-shadow:0 1px 3px rgba(45,50,119,.06)}
@@ -236,6 +238,7 @@ select option{background:#fff}
 .wc-alert.has-over{color:#c0392b;font-weight:500}
 .wc-divider{height:1px;background:linear-gradient(90deg,transparent,rgba(45,50,119,.2),transparent);margin:12px 0}
 .wc-quote{font-size:13px;color:rgba(45,50,119,.9);font-style:italic;position:relative;line-height:1.6}
+.wc-quote-es{font-size:11px;color:rgba(45,50,119,.55);font-style:italic;margin-top:3px;line-height:1.5;border-top:1px dashed rgba(45,50,119,.15);padding-top:4px;margin-top:6px}
 .wc-quote-day{font-size:10px;color:rgba(45,50,119,.5);font-family:'DM Mono',monospace;letter-spacing:.08em;margin-top:6px}
 
 
@@ -885,17 +888,291 @@ const PDI_MOTS=['Marque sua primeira ação!','Ótimo começo!','Evoluindo bem!'
 let currentMember = null;
 let S = {tasks:{}, pdiDone:{}, pdiTasks:JSON.parse(JSON.stringify(PDI_TASKS_DEFAULT)), feedbacks:[], aligns:[], openPanels:{}};
 
+// ── Google Sheets config ──────────────────────────────────────
+const GS_URL = 'https://script.google.com/a/macros/mercadolivre.com/s/AKfycbzAFBpVKZqUe-Y774IwjJI-gy3CyI00PYulsxTttiDbeZoLMSSO8Vb48OoxuPpWRvsgAA/exec';
+let GS_ONLINE = false;   // true quando Sheets está respondendo
+let GS_SAVING = false;   // evita saves simultâneos
+let GS_SAVE_QUEUE = null; // último estado pendente de salvar
+
+// ── Indicador visual de sync ──────────────────────────────────
+function showSyncBadge(state){
+  // state: 'saving' | 'saved' | 'offline' | 'error'
+  let badge = document.getElementById('gs-sync-badge');
+  if(!badge){
+    badge = document.createElement('div');
+    badge.id = 'gs-sync-badge';
+    badge.style.cssText = 'position:fixed;bottom:1.2rem;right:1.2rem;z-index:9999;'
+      +'border-radius:20px;padding:5px 12px;font-size:11px;font-family:"DM Sans",sans-serif;'
+      +'font-weight:600;display:flex;align-items:center;gap:6px;box-shadow:0 2px 12px rgba(0,0,0,.15);'
+      +'transition:all .3s ease;cursor:default;';
+    document.body.appendChild(badge);
+  }
+  const configs = {
+    saving: { bg:'#2D3277', color:'#fff',  icon:'⏳', text:'Salvando...' },
+    saved:  { bg:'#22c55e', color:'#fff',  icon:'✓',  text:'Salvo no Sheets' },
+    offline:{ bg:'#f59e0b', color:'#fff',  icon:'⚡', text:'Modo offline' },
+    error:  { bg:'#ef4444', color:'#fff',  icon:'⚠',  text:'Erro ao salvar' },
+    loading:{ bg:'#3d45a0', color:'#fff',  icon:'🔄', text:'Carregando...' },
+  };
+  const cfg = configs[state] || configs.offline;
+  badge.style.background = cfg.bg;
+  badge.style.color = cfg.color;
+  badge.innerHTML = cfg.icon + ' ' + cfg.text;
+  badge.style.opacity = '1';
+  if(state === 'saved'){
+    setTimeout(()=>{ badge.style.opacity = '0'; }, 3000);
+  }
+}
+
+// ── API call helper ───────────────────────────────────────────
+async function gsGet(params){
+  const url = GS_URL + '?' + new URLSearchParams(params).toString();
+  const resp = await fetch(url, { redirect:'follow' });
+  return resp.json();
+}
+
+async function gsPost(body){
+  const resp = await fetch(GS_URL, {
+    method:'POST',
+    body: JSON.stringify(body),
+    headers:{'Content-Type':'application/json'},
+    redirect:'follow'
+  });
+  return resp.json();
+}
+
+// ── Carregar todos os dados do Sheets para o estado S ─────────
+async function loadFromSheets(){
+  try {
+    showSyncBadge('loading');
+
+    // Pinga o servidor
+    const ping = await gsGet({action:'ping'}).catch(()=>null);
+    if(!ping || !ping.ok){ GS_ONLINE = false; showSyncBadge('offline'); return false; }
+    GS_ONLINE = true;
+
+    // Carrega todas as abas em paralelo
+    const [
+      tasksRes, statusRes, updatesRes,
+      alignsRes, alignCmtRes, photosRes
+    ] = await Promise.all([
+      gsGet({action:'getAll', sheet:'tasks'}),
+      gsGet({action:'getAll', sheet:'task_status_history'}),
+      gsGet({action:'getAll', sheet:'task_updates'}),
+      gsGet({action:'getAll', sheet:'aligns'}),
+      gsGet({action:'getAll', sheet:'align_tl_comments'}),
+      gsGet({action:'getAll', sheet:'photos'}),
+    ]);
+
+    // ── Tasks ──────────────────────────────────────────────────
+    S.tasks = {};
+    (tasksRes.rows||[]).forEach(r => {
+      if(!S.tasks[r.memberId]) S.tasks[r.memberId] = [];
+      S.tasks[r.memberId].push({
+        id:          r.id,
+        title:       r.title,
+        startDate:   r.startDate,
+        deadline:    r.deadline,
+        criticidade: r.criticidade,
+        notes:       r.notes,
+        mentions:    _parseJSON(r.mentions, []),
+        done:        r.done === true || r.done === 'true' || r.done === 'TRUE',
+        doneDate:    r.doneDate,
+        createdAt:   r.createdAt,
+      });
+    });
+
+    // ── Task status history ────────────────────────────────────
+    S.taskStatusHistory = {};
+    (statusRes.rows||[]).forEach(r => {
+      if(!S.taskStatusHistory[r.taskId]) S.taskStatusHistory[r.taskId] = [];
+      S.taskStatusHistory[r.taskId].push({
+        status: r.status,
+        date:   r.date,
+        note:   r.note,
+        author: r.author,
+        attachments: _parseJSON(r.attachments, []),
+      });
+    });
+
+    // ── Task pending validation ────────────────────────────────
+    S.taskPendingValidation = {};
+    Object.entries(S.taskStatusHistory||{}).forEach(([tid, hist]) => {
+      if(hist.length && hist[hist.length-1].status === 'validacao'){
+        const last = hist[hist.length-1];
+        S.taskPendingValidation[tid] = {
+          requestedBy: last.author,
+          date: last.date,
+          note: last.note,
+        };
+      }
+    });
+
+    // ── Task updates (comments) ────────────────────────────────
+    S.taskUpdates = {};
+    (updatesRes.rows||[]).forEach(r => {
+      if(!S.taskUpdates[r.taskId]) S.taskUpdates[r.taskId] = [];
+      S.taskUpdates[r.taskId].push({
+        id:         r.id,
+        text:       r.text,
+        authorId:   r.authorId,
+        authorName: r.authorName,
+        isLider:    r.isLider === true || r.isLider === 'true' || r.isLider === 'TRUE',
+        read:       _parseJSON(r.readBy, {}),
+        createdAt:  r.createdAt,
+      });
+    });
+
+    // ── Aligns ─────────────────────────────────────────────────
+    S.aligns = (alignsRes.rows||[]).map(r => ({
+      id:          r.id,
+      memberId:    r.memberId,
+      title:       r.title,
+      description: r.description,
+      startDate:   r.startDate,
+      deadline:    r.deadline,
+      priority:    r.priority,
+      mentions:    _parseJSON(r.mentions, []),
+      done:        r.done === true || r.done === 'true' || r.done === 'TRUE',
+      doneDate:    r.doneDate,
+      createdAt:   r.createdAt,
+    }));
+
+    // ── Align TL comments ──────────────────────────────────────
+    S.alignTlComments = {};
+    (alignCmtRes.rows||[]).forEach(r => {
+      if(!S.alignTlComments[r.alignId]) S.alignTlComments[r.alignId] = [];
+      S.alignTlComments[r.alignId].push({
+        status: r.status,
+        date:   r.date,
+        note:   r.note,
+        author: r.author,
+        attachments: _parseJSON(r.attachments, []),
+      });
+    });
+
+    // ── Photos ─────────────────────────────────────────────────
+    S.photos = {};
+    (photosRes.rows||[]).forEach(r => {
+      if(r.memberId && r.photoData) S.photos[r.memberId] = r.photoData;
+    });
+
+    // Salva cópia local como cache
+    _saveLocalCache();
+    showSyncBadge('saved');
+    return true;
+
+  } catch(err) {
+    console.warn('Sheets load error:', err);
+    GS_ONLINE = false;
+    showSyncBadge('offline');
+    return false;
+  }
+}
+
+// ── Salvar estado atual no Sheets ─────────────────────────────
+async function saveToSheets(){
+  if(!GS_ONLINE) return;
+  if(GS_SAVING){ GS_SAVE_QUEUE = true; return; }
+  GS_SAVING = true;
+  showSyncBadge('saving');
+  try {
+    // Monta payload completo
+    const payload = {
+      tasks:              _flattenTasks(),
+      taskStatusHistory:  _flattenStatusHistory(),
+      taskUpdates:        _flattenTaskUpdates(),
+      aligns:             S.aligns || [],
+      alignTlComments:    S.alignTlComments || {},
+      photos:             S.photos || {},
+      taskPendingValidation: S.taskPendingValidation || {},
+    };
+    await gsPost({ action:'syncAll', payload });
+    showSyncBadge('saved');
+  } catch(err){
+    console.warn('Sheets save error:', err);
+    showSyncBadge('error');
+  } finally {
+    GS_SAVING = false;
+    if(GS_SAVE_QUEUE){ GS_SAVE_QUEUE = false; saveToSheets(); }
+  }
+}
+
+// ── Helpers de flatten ────────────────────────────────────────
+function _flattenTasks(){
+  const rows = [];
+  Object.entries(S.tasks||{}).forEach(([memberId, tasks]) => {
+    (tasks||[]).forEach(t => rows.push({...t, memberId,
+      mentions: JSON.stringify(t.mentions||[]) }));
+  });
+  return rows;
+}
+
+function _flattenStatusHistory(){
+  const rows = [];
+  Object.entries(S.taskStatusHistory||{}).forEach(([taskId, entries]) => {
+    (entries||[]).forEach((e, i) => rows.push({
+      id: taskId+'_'+i, taskId, ...e,
+      attachments: JSON.stringify(e.attachments||[])
+    }));
+  });
+  return rows;
+}
+
+function _flattenTaskUpdates(){
+  const rows = [];
+  Object.entries(S.taskUpdates||{}).forEach(([taskId, updates]) => {
+    (updates||[]).forEach(u => rows.push({
+      ...u, taskId,
+      readBy: JSON.stringify(u.read||{}),
+    }));
+  });
+  return rows;
+}
+
+function _parseJSON(val, fallback){
+  if(!val || val === '') return fallback;
+  if(typeof val === 'object') return val;
+  try{ return JSON.parse(val); } catch(e){ return fallback; }
+}
+
+function _saveLocalCache(){
+  try{ localStorage.setItem('cco-team-v2', JSON.stringify(S)); }catch(e){}
+}
+
+// ── loadState: tenta Sheets, cai no localStorage se offline ───
 function loadState(){
-  try{const d=localStorage.getItem('cco-team-v2');if(d){const p=JSON.parse(d);S=Object.assign(S,p);}}catch(e){}
-  // Always reset PDI tasks — members fill their own
-  S.pdiTasks=[];
-  S.pdiDone={};
-  if(!S.pdiCategories) S.pdiCategories=['Query','Dataflow','AppSheet'];
-  if(!S.pdiMesNames) S.pdiMesNames={1:'Mês 1',2:'Mês 2',3:'Mês 3'};
+  // Carrega cache local imediatamente (para UI rápida)
+  try{
+    const d = localStorage.getItem('cco-team-v2');
+    if(d){ const p = JSON.parse(d); S = Object.assign(S, p); }
+  }catch(e){}
+
+  // PDI e feedbacks sempre locais
+  if(!S.pdiTasks || !S.pdiTasks.length) S.pdiTasks = [];
+  S.pdiDone = S.pdiDone || {};
+  if(!S.pdiCategories) S.pdiCategories = ['Query','Dataflow','AppSheet'];
+  if(!S.pdiMesNames)   S.pdiMesNames   = {1:'Mês 1',2:'Mês 2',3:'Mês 3'};
+  if(!S.feedbacks)     S.feedbacks     = [];
+
+  // Tenta carregar do Sheets em background
+  loadFromSheets().then(ok => {
+    if(ok){ render(); }
+  });
 }
+
+// ── saveState: salva local + enfileira sync com Sheets ────────
+let _saveTimer = null;
 function saveState(){
-  try{localStorage.setItem('cco-team-v2',JSON.stringify(S));}catch(e){}
+  // Salva local imediatamente
+  _saveLocalCache();
+  // Debounce de 1.5s para não spammar o Sheets
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => saveToSheets(), 1500);
 }
+
+// ── Adicionar syncAll no Apps Script (handler extra) ─────────
+// O saveAll do Apps Script vai receber o payload completo e sobrescrever tudo
 
 function getMember(id){return MEMBERS.find(m=>m.id===id);}
 function getMemberTasks(id){return S.tasks[id]||[];}
@@ -923,7 +1200,10 @@ function getAllTasksForMember(mid){
 function isTaskFinalized(t){
   if(t.done) return true;
   const hist=(S.taskStatusHistory&&S.taskStatusHistory[t.id])||[];
-  return hist.length>0 && hist[hist.length-1].status==='finalizado';
+  // Only truly finalized if last status is finalizado AND no pending validation
+  const hasFinalizado = hist.length>0 && hist[hist.length-1].status==='finalizado';
+  const pending = S.taskPendingValidation && S.taskPendingValidation[t.id];
+  return hasFinalizado && !pending;
 }
 
 function getTaskTimelineStatus(t){
@@ -1847,41 +2127,42 @@ function closePhotoModal(){
 
 
 const FRASES = [
-  "O único modo de fazer um excelente trabalho é amá-lo. — Steve Jobs",
-  "O sucesso é a soma de pequenos esforços repetidos diariamente. — Robert Collier",
-  "Não espere por condições ideais para agir. Comece agora com o que você tem. — Napoleon Hill",
-  "A excelência nunca é acidente. É sempre resultado de uma intenção. — Aristóteles",
-  "O trabalho em equipe divide as tarefas e multiplica os resultados. — Equipe CCO",
-  "Planejamento sem ação é ilusão. Ação sem planejamento é imprudência. — Peter Drucker",
-  "O tempo é o recurso mais escasso. Gerencie-o bem. — Peter Drucker",
-  "A produtividade nunca é acidente. É sempre resultado de comprometimento. — Paul J. Meyer",
-  "Comece onde você está, use o que você tem, faça o que você pode. — Arthur Ashe",
-  "O sucesso é ir de fracasso em fracasso sem perder o entusiasmo. — Winston Churchill",
-  "Trabalho duro supera o talento quando o talento não trabalha duro. — Tim Notke",
-  "Não é sobre ter tempo, é sobre fazer tempo. — Desconhecido",
-  "Grandes realizações são possíveis quando você não se importa com quem leva o crédito. — Harry Truman",
-  "A qualidade não é um ato, é um hábito. — Aristóteles",
-  "Sozinhos vamos mais rápido. Juntos chegamos mais longe. — Provérbio africano",
-  "O segredo do progresso é começar. — Mark Twain",
-  "Discipline é a ponte entre metas e realizações. — Jim Rohn",
-  "A melhor forma de prever o futuro é criá-lo. — Peter Drucker",
-  "Cada detalhe bem feito é uma forma de arte. — Charles M. Schulz",
-  "Nenhum de nós é tão inteligente quanto todos nós juntos. — Ken Blanchard",
-  "Não meça seu progresso com a régua de outra pessoa. — Desconhecido",
-  "A organização não é uma questão de talento, é uma questão de decisão. — Desconhecido",
-  "Faça cada tarefa como se fosse a mais importante do dia. Talvez seja. — Desconhecido",
-  "O esforço de hoje é a conquista de amanhã. — Equipe CCO",
-  "Foco é a arte de dizer não a mil boas ideias. — Steve Jobs",
-  "Quem quer faz. Quem não quer arruma desculpa. — Desconhecido",
-  "Excelência não é uma habilidade. É uma atitude. — Ralph Marston",
-  "Pequenos progressos diários levam a grandes resultados. — Desconhecido",
-  "O trabalho bem feito é a maior forma de respeito pela equipe. — Equipe CCO",
-  "Resultados vêm de ações. Ações vêm de decisões. Decida agora. — Tony Robbins",
+  {pt:"O único modo de fazer um excelente trabalho é amá-lo. — Steve Jobs", es:"La única forma de hacer un trabajo excelente es amarlo. — Steve Jobs"},
+  {pt:"O sucesso é a soma de pequenos esforços repetidos diariamente. — Robert Collier", es:"El éxito es la suma de pequeños esfuerzos repetidos cada día. — Robert Collier"},
+  {pt:"Não espere por condições ideais para agir. Comece agora com o que você tem. — Napoleon Hill", es:"No esperes condiciones ideales para actuar. Empieza ahora con lo que tienes. — Napoleon Hill"},
+  {pt:"A excelência nunca é acidente. É sempre resultado de uma intenção. — Aristóteles", es:"La excelencia nunca es accidental. Siempre es el resultado de una intención. — Aristóteles"},
+  {pt:"O trabalho em equipe divide as tarefas e multiplica os resultados. — Equipe CCO", es:"El trabajo en equipo divide las tareas y multiplica los resultados. — Equipo CCO"},
+  {pt:"Planejamento sem ação é ilusão. Ação sem planejamento é imprudência. — Peter Drucker", es:"La planificación sin acción es ilusión. La acción sin planificación es imprudencia. — Peter Drucker"},
+  {pt:"O tempo é o recurso mais escasso. Gerencie-o bem. — Peter Drucker", es:"El tiempo es el recurso más escaso. Adminístralo bien. — Peter Drucker"},
+  {pt:"A produtividade nunca é acidente. É sempre resultado de comprometimento. — Paul J. Meyer", es:"La productividad nunca es accidental. Siempre es el resultado del compromiso. — Paul J. Meyer"},
+  {pt:"Comece onde você está, use o que você tem, faça o que você pode. — Arthur Ashe", es:"Empieza donde estás, usa lo que tienes, haz lo que puedes. — Arthur Ashe"},
+  {pt:"O sucesso é ir de fracasso em fracasso sem perder o entusiasmo. — Winston Churchill", es:"El éxito es ir de fracaso en fracaso sin perder el entusiasmo. — Winston Churchill"},
+  {pt:"Trabalho duro supera o talento quando o talento não trabalha duro. — Tim Notke", es:"El trabajo duro supera al talento cuando el talento no trabaja duro. — Tim Notke"},
+  {pt:"Não é sobre ter tempo, é sobre fazer tempo. — Desconhecido", es:"No se trata de tener tiempo, sino de hacer tiempo. — Desconocido"},
+  {pt:"Grandes realizações são possíveis quando você não se importa com quem leva o crédito. — Harry Truman", es:"Los grandes logros son posibles cuando no te importa quién se lleva el crédito. — Harry Truman"},
+  {pt:"A qualidade não é um ato, é um hábito. — Aristóteles", es:"La calidad no es un acto, es un hábito. — Aristóteles"},
+  {pt:"Sozinhos vamos mais rápido. Juntos chegamos mais longe. — Provérbio africano", es:"Solos vamos más rápido. Juntos llegamos más lejos. — Proverbio africano"},
+  {pt:"O segredo do progresso é começar. — Mark Twain", es:"El secreto del progreso es empezar. — Mark Twain"},
+  {pt:"A disciplina é a ponte entre metas e realizações. — Jim Rohn", es:"La disciplina es el puente entre las metas y los logros. — Jim Rohn"},
+  {pt:"A melhor forma de prever o futuro é criá-lo. — Peter Drucker", es:"La mejor manera de predecir el futuro es crearlo. — Peter Drucker"},
+  {pt:"Cada detalhe bem feito é uma forma de arte. — Charles M. Schulz", es:"Cada detalle bien hecho es una forma de arte. — Charles M. Schulz"},
+  {pt:"Nenhum de nós é tão inteligente quanto todos nós juntos. — Ken Blanchard", es:"Ninguno de nosotros es tan inteligente como todos nosotros juntos. — Ken Blanchard"},
+  {pt:"Não meça seu progresso com a régua de outra pessoa. — Desconhecido", es:"No midas tu progreso con la regla de otra persona. — Desconocido"},
+  {pt:"A organização não é uma questão de talento, é uma questão de decisão. — Desconhecido", es:"La organización no es cuestión de talento, es cuestión de decisión. — Desconocido"},
+  {pt:"Faça cada tarefa como se fosse a mais importante do dia. Talvez seja. — Desconhecido", es:"Haz cada tarea como si fuera la más importante del día. Quizás lo sea. — Desconocido"},
+  {pt:"O esforço de hoje é a conquista de amanhã. — Equipe CCO", es:"El esfuerzo de hoy es el logro de mañana. — Equipo CCO"},
+  {pt:"Foco é a arte de dizer não a mil boas ideias. — Steve Jobs", es:"El foco es el arte de decirle no a mil buenas ideas. — Steve Jobs"},
+  {pt:"Quem quer faz. Quem não quer arruma desculpa. — Desconhecido", es:"Quien quiere, hace. Quien no quiere, busca excusas. — Desconocido"},
+  {pt:"Excelência não é uma habilidade. É uma atitude. — Ralph Marston", es:"La excelencia no es una habilidad. Es una actitud. — Ralph Marston"},
+  {pt:"Pequenos progressos diários levam a grandes resultados. — Desconhecido", es:"Los pequeños avances diarios conducen a grandes resultados. — Desconocido"},
+  {pt:"O trabalho bem feito é a maior forma de respeito pela equipe. — Equipe CCO", es:"El trabajo bien hecho es la mayor muestra de respeto por el equipo. — Equipo CCO"},
+  {pt:"Resultados vêm de ações. Ações vêm de decisões. Decida agora. — Tony Robbins", es:"Los resultados vienen de las acciones. Las acciones vienen de las decisiones. Decide ahora. — Tony Robbins"},
 ];
 
 function getFraseDoDia(){
   const day = Math.floor(Date.now() / (1000*60*60*24));
-  return FRASES[day % FRASES.length];
+  const f = FRASES[day % FRASES.length];
+  return f.pt + '<div class="wc-quote-es">' + f.es + '</div>';
 }
 
 function renderWelcomeCard(){
@@ -1899,9 +2180,10 @@ function renderWelcomeCard(){
       <div class="wc-greeting">Olá, Viviane! 👋</div>
       <div class="wc-alert ${totalOver>0?'has-over':''}">${alertMsg}</div>
       <div class="wc-divider"></div>
-      <div class="wc-quote">"${getFraseDoDia()}"</div>
-      <div class="wc-quote-day">frase do dia</div>
+      <div class="wc-quote"></div>
+      <div class="wc-quote-day">frase do dia · frase del día</div>
     </div>`;
+    wrap.querySelector('.wc-quote').innerHTML = '\u201c' + getFraseDoDia() + '\u201d';
     return;
   }
   const m = getMember(currentMember);
@@ -1925,9 +2207,10 @@ function renderWelcomeCard(){
     <div class="wc-greeting">Olá, ${firstName}! 👋</div>
     <div class="wc-alert ${over>0?'has-over':''}">${alertMsg}</div>
     <div class="wc-divider"></div>
-    <div class="wc-quote">"${getFraseDoDia()}"</div>
-    <div class="wc-quote-day">frase do dia</div>
+    <div class="wc-quote"></div>
+    <div class="wc-quote-day">frase do dia · frase del día</div>
   </div>`;
+  wrap.querySelector('.wc-quote').innerHTML = '\u201c' + getFraseDoDia() + '\u201d';
 }
 
 
@@ -2593,12 +2876,20 @@ function renderMiniTimeline(tid, container){
 }
 
 function getTaskBadges(tid, mid){
+  let out = '';
+  // Pending validation badge
+  if(S.taskPendingValidation && S.taskPendingValidation[tid]){
+    if(currentMember === 'viviane'){
+      out += '<button onclick="event.stopPropagation();openTlModal(\''+tid+'\',\''+mid+'\')" style="border:1.5px solid #fcd34d;background:#fffbeb;color:#92400e;border-radius:20px;padding:2px 9px;font-size:11px;cursor:pointer;font-family:inherit;font-weight:600;animation:pulse-amber 2s infinite">⏳ Validar finalização</button>';
+    } else {
+      out += '<span style="border:1px solid #fcd34d;background:#fffbeb;color:#92400e;border-radius:20px;padding:2px 9px;font-size:11px;font-family:inherit">⏳ Aguardando validação</span>';
+    }
+  }
   const upds = (S.taskUpdates&&S.taskUpdates[tid])||[];
-  if(!upds.length) return '';
+  if(!upds.length) return out;
   const liderUnread = upds.filter(u=>(u.isLider||u.authorId==='viviane')&&!(u.read&&u.read[currentMember]));
   const memberUnread = upds.filter(u=>!(u.isLider||u.authorId==='viviane')&&u.authorId!==currentMember&&!(u.read&&u.read[currentMember]));
   const fn = 'event.stopPropagation();openUpdates(\'' + tid + '\',\'' + mid + '\')';
-  let out = '';
   if(liderUnread.length){
     out += '<button onclick="'+fn+'" style="border:1px solid #fca5a5;background:#fef2f2;color:#dc2626;border-radius:20px;padding:2px 8px;font-size:11px;cursor:pointer;font-family:inherit;animation:pulse-red 2s infinite">🔔 '+liderUnread.length+'</button>';
   } else if(memberUnread.length){
@@ -4749,6 +5040,34 @@ function renderTlModalBody(tid, mid){
     body.appendChild(entry);
   });
 
+  // ── Viviane validation panel ──────────────────────────────────
+  var pending = S.taskPendingValidation && S.taskPendingValidation[tid];
+  if(pending){
+    var valBanner = document.createElement('div');
+    valBanner.style.cssText = 'background:rgba(255,230,0,.2);border:1.5px solid rgba(255,210,0,.5);border-radius:14px;padding:1rem 1.1rem;display:flex;flex-direction:column;gap:8px';
+    var valTitle = document.createElement('div');
+    valTitle.style.cssText = 'font-size:11px;font-family:"DM Mono",monospace;letter-spacing:.1em;text-transform:uppercase;color:#92400e;font-weight:600';
+    valTitle.textContent = '⏳ Aguardando validação da liderança';
+    var valDesc = document.createElement('div');
+    valDesc.style.cssText = 'font-size:12px;color:var(--text2);line-height:1.5';
+    valDesc.textContent = (pending.requestedByName || 'Membro') + ' solicitou a finalização em ' + pending.date + (pending.note ? ' — "' + pending.note + '"' : '') + '.';
+    valBanner.appendChild(valTitle);
+    valBanner.appendChild(valDesc);
+    if(currentMember === 'viviane'){
+      var valBtn = document.createElement('button');
+      valBtn.style.cssText = 'background:#22c55e;color:#fff;border:none;border-radius:10px;padding:10px 20px;font-size:13px;font-weight:600;cursor:pointer;font-family:"DM Sans",sans-serif;display:flex;align-items:center;gap:8px;width:100%;justify-content:center;box-shadow:0 2px 8px rgba(34,197,94,.35)';
+      valBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M2.5 8l4 4 7-7"/></svg> Confirmar finalização';
+      (function(taskId, taskMid){ valBtn.addEventListener('click', function(){ viviConfirmFinalize(taskId, taskMid); }); })(tid, mid);
+      valBanner.appendChild(valBtn);
+    } else {
+      var valHint = document.createElement('div');
+      valHint.style.cssText = 'font-size:11px;color:var(--text3);font-style:italic';
+      valHint.textContent = 'Somente a Viviane pode confirmar a finalização desta tarefa.';
+      valBanner.appendChild(valHint);
+    }
+    body.appendChild(valBanner);
+  }
+
   updateTlFooter(tid, totalCmts, totalAttach);
 }
 
@@ -5486,17 +5805,51 @@ function addTaskStatusFromTlModal(){
   var dt  = document.getElementById('tl-new-st-date');
   var note= document.getElementById('tl-new-st-note');
   if(!sel||!sel.value) return;
+  var chosenStatus = sel.value;
+
+  // If finalizado and NOT Viviane → set pendingValidation flag instead
+  if(chosenStatus === 'finalizado' && currentMember !== 'viviane'){
+    if(!S.taskPendingValidation) S.taskPendingValidation = {};
+    S.taskPendingValidation[tlCurrentTid] = {
+      requestedBy: currentMember,
+      requestedByName: getMember(currentMember) ? getMember(currentMember).name.split(' ')[0] : '',
+      date: dt&&dt.value ? fmtDate(dt.value) : new Date().toLocaleDateString('pt-BR'),
+      note: note ? note.value.trim() : ''
+    };
+    // Still register status entry as "Em validação" automatically
+    if(!S.taskStatusHistory) S.taskStatusHistory = {};
+    if(!S.taskStatusHistory[tlCurrentTid]) S.taskStatusHistory[tlCurrentTid] = [];
+    var m = getMember(currentMember);
+    var entry = {
+      status: 'validacao',
+      date: dt&&dt.value ? fmtDate(dt.value) : new Date().toLocaleDateString('pt-BR'),
+      note: (note?note.value.trim():'') || 'Solicitou finalização — aguardando validação da liderança',
+      author: m?m.name.split(' ')[0]:''
+    };
+    S.taskStatusHistory[tlCurrentTid].push(entry);
+    if(note) note.value='';
+    var prev = document.getElementById('tl-new-st-file-preview');
+    if(prev){ prev.innerHTML=''; prev.style.display='none'; }
+    showCatToast('validacao');
+    saveState();
+    renderTlModalBody(tlCurrentTid, tlCurrentMid);
+    renderTasks();
+    // Show info toast
+    showInfoToast('⏳ Solicitação enviada para validação da Viviane!');
+    return;
+  }
+
   if(!S.taskStatusHistory) S.taskStatusHistory = {};
   if(!S.taskStatusHistory[tlCurrentTid]) S.taskStatusHistory[tlCurrentTid] = [];
-  var m = getMember(currentMember);
-  var entry = {
-    status: sel.value,
+  var m2 = getMember(currentMember);
+  var entry2 = {
+    status: chosenStatus,
     date: dt&&dt.value ? fmtDate(dt.value) : new Date().toLocaleDateString('pt-BR'),
     note: note?note.value.trim():'',
-    author: m?m.name.split(' ')[0]:''
+    author: m2?m2.name.split(' ')[0]:''
   };
   if(tlNewStFiles.length>0){
-    entry.attachments = tlNewStFiles.slice();
+    entry2.attachments = tlNewStFiles.slice();
     if(!S.tlAttachments) S.tlAttachments={};
     if(!S.tlAttachments[tlCurrentTid]) S.tlAttachments[tlCurrentTid]={};
     tlNewStFiles.forEach(function(f){
@@ -5506,15 +5859,18 @@ function addTaskStatusFromTlModal(){
     });
     tlNewStFiles = [];
   }
-  S.taskStatusHistory[tlCurrentTid].push(entry);
+  S.taskStatusHistory[tlCurrentTid].push(entry2);
+  // If Viviane confirms finalizado, clear pending validation
+  if(chosenStatus === 'finalizado' && currentMember === 'viviane'){
+    if(S.taskPendingValidation) delete S.taskPendingValidation[tlCurrentTid];
+  }
   if(note) note.value = '';
-  var prev = document.getElementById('tl-new-st-file-preview');
-  if(prev){ prev.innerHTML=''; prev.style.display='none'; }
-  showCatToast(sel.value);
+  var prev2 = document.getElementById('tl-new-st-file-preview');
+  if(prev2){ prev2.innerHTML=''; prev2.style.display='none'; }
+  showCatToast(chosenStatus);
   saveState();
   renderTlModalBody(tlCurrentTid, tlCurrentMid);
   renderTasks();
-  // Confetti on the card in list
   setTimeout(function(){
     var card = document.getElementById('tc-'+tlCurrentTid);
     if(card) confetti(card);
@@ -5537,6 +5893,42 @@ openTlModal = function(tid, mid, fromKanban){
   var prev = document.getElementById('tl-new-st-file-preview');
   if(prev){ prev.innerHTML=''; prev.style.display='none'; }
 };
+
+// INFO TOAST
+function showInfoToast(msg){
+  var existing = document.getElementById('info-toast');
+  if(existing) existing.remove();
+  var toast = document.createElement('div');
+  toast.id = 'info-toast';
+  toast.style.cssText = 'position:fixed;top:1.5rem;left:50%;transform:translateX(-50%);z-index:9999;background:#2D3277;color:#fff;border-radius:14px;box-shadow:0 8px 32px rgba(45,50,119,.35);padding:.75rem 1.5rem;font-size:13px;font-weight:500;font-family:"DM Sans",sans-serif;text-align:center;animation:catpop .3s ease;white-space:nowrap';
+  toast.textContent = msg;
+  document.body.appendChild(toast);
+  setTimeout(function(){ if(toast.parentNode) toast.parentNode.removeChild(toast); }, 3500);
+}
+
+// VIVIANE CONFIRMS FINALIZATION
+function viviConfirmFinalize(tid, mid){
+  if(currentMember !== 'viviane') return;
+  if(!S.taskPendingValidation || !S.taskPendingValidation[tid]) return;
+  var pv = S.taskPendingValidation[tid];
+  if(!S.taskStatusHistory) S.taskStatusHistory = {};
+  if(!S.taskStatusHistory[tid]) S.taskStatusHistory[tid] = [];
+  S.taskStatusHistory[tid].push({
+    status: 'finalizado',
+    date: new Date().toLocaleDateString('pt-BR'),
+    note: 'Finalização validada ✓',
+    author: 'Viviane'
+  });
+  delete S.taskPendingValidation[tid];
+  showCatToast('finalizado');
+  saveState();
+  closeTlModal();
+  render();
+  setTimeout(function(){
+    var card = document.getElementById('tc-'+tid);
+    if(card) confetti(card);
+  }, 150);
+}
 
 // INIT
 loadState();
