@@ -6046,26 +6046,82 @@ function onTeTagChange(sel){
 }
 
 function promptAddTag(selectId){
-  const name = prompt('Nome da nova tag:');
-  if(!name || !name.trim()) { populateTagSelect(selectId, ''); return; }
-  const tag = name.trim();
+  openTagModal('add', selectId);
+}
+
+function promptDeleteTag(selectId){
+  openTagModal('delete', selectId);
+}
+
+// ── Custom tag modal (replaces browser prompt) ────────────────
+let _tagModalSelectId = null;
+let _tagModalMode = null;
+
+function openTagModal(mode, selectId){
+  _tagModalMode = mode;
+  _tagModalSelectId = selectId;
+  const modal = document.getElementById('tag-modal');
+  const title = document.getElementById('tag-modal-title');
+  const body  = document.getElementById('tag-modal-body');
+  const inp   = document.getElementById('tag-modal-input');
+
+  if(mode === 'add'){
+    title.textContent = '🏷 Nova tag';
+    inp.placeholder = 'Nome da tag...';
+    inp.value = '';
+    body.innerHTML = '';
+  } else {
+    title.textContent = '🗑 Remover tag';
+    inp.style.display = 'none';
+    const tags = getGlobalTags();
+    body.innerHTML = tags.map(t =>
+      `<div onclick="confirmDeleteTag('${t}')" style="padding:9px 12px;border-radius:9px;font-size:13px;cursor:pointer;color:var(--text);font-family:'DM Sans',sans-serif;display:flex;align-items:center;justify-content:space-between;gap:8px;transition:background .15s" onmouseover="this.style.background='#fef2f2'" onmouseout="this.style.background='transparent'">
+        <span>${t}</span>
+        <span style="font-size:11px;color:#ef4444;font-weight:600">remover</span>
+      </div>`
+    ).join('') || '<div style="font-size:12px;color:var(--text3);padding:8px">Nenhuma tag cadastrada.</div>';
+  }
+
+  if(mode === 'add'){
+    inp.style.display = '';
+    document.getElementById('tag-modal-confirm').style.display = '';
+    document.getElementById('tag-modal-confirm').textContent = 'Adicionar';
+  } else {
+    document.getElementById('tag-modal-confirm').style.display = 'none';
+  }
+
+  modal.style.display = 'flex';
+  if(mode === 'add') setTimeout(()=>inp.focus(), 100);
+}
+
+function closeTagModal(){
+  document.getElementById('tag-modal').style.display = 'none';
+  _tagModalSelectId = null;
+  _tagModalMode = null;
+  const inp = document.getElementById('tag-modal-input');
+  inp.value = '';
+  inp.style.display = '';
+}
+
+function confirmAddTag(){
+  const inp = document.getElementById('tag-modal-input');
+  const tag = inp.value.trim();
+  if(!tag){ inp.focus(); return; }
+  const selectId = _tagModalSelectId;
   if(!S.globalTags) S.globalTags = [];
   if(!S.globalTags.includes(tag)) { S.globalTags.push(tag); saveState(); }
+  closeTagModal();
   populateTagSelect(selectId, tag);
   const sel = document.getElementById(selectId);
   if(sel) sel.value = tag;
   updateTagFilterDropdown();
 }
 
-function promptDeleteTag(selectId){
-  const tags = getGlobalTags();
-  if(!tags.length){ alert('Nenhuma tag para remover.'); populateTagSelect(selectId,''); return; }
-  const name = prompt('Qual tag deseja remover?\n\n' + tags.map((t,i)=>`${i+1}. ${t}`).join('\n') + '\n\nDigite o nome exato:');
-  if(!name || !name.trim()){ populateTagSelect(selectId, document.getElementById(selectId)?.dataset?.current||''); return; }
-  const tag = name.trim();
-  if(!S.globalTags.includes(tag)){ alert('Tag não encontrada.'); populateTagSelect(selectId,''); return; }
+function confirmDeleteTag(tag){
   S.globalTags = S.globalTags.filter(t => t !== tag);
   saveState();
+  const selectId = _tagModalSelectId;
+  closeTagModal();
   populateTagSelect(selectId, '');
   updateTagFilterDropdown();
 }
@@ -6555,6 +6611,21 @@ renderMemberScreen();
     <button class="photo-modal-close" onclick="closePhotoModal()">×</button>
     <img id="photo-modal-img" src="" alt="">
     <div class="photo-modal-name" id="photo-modal-name"></div>
+  </div>
+</div>
+
+<!-- TAG MODAL -->
+<div id="tag-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:99999;align-items:center;justify-content:center;padding:1rem" onclick="if(event.target===this)closeTagModal()">
+  <div style="background:#fff;border-radius:18px;width:100%;max-width:360px;box-shadow:0 8px 40px rgba(45,50,119,.22);animation:tlpop .2s ease;overflow:hidden">
+    <div style="padding:1.1rem 1.25rem .8rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+      <div style="font-size:15px;font-weight:600;color:var(--blue);font-family:'DM Sans',sans-serif" id="tag-modal-title">Tag</div>
+      <button onclick="closeTagModal()" style="background:none;border:none;cursor:pointer;font-size:20px;color:var(--text3);line-height:1;padding:0 4px">×</button>
+    </div>
+    <div style="padding:.85rem 1.25rem;max-height:260px;overflow-y:auto" id="tag-modal-body"></div>
+    <div style="padding:.75rem 1.25rem;border-top:1px solid var(--border);display:flex;gap:8px">
+      <input type="text" id="tag-modal-input" placeholder="Nome da tag..." onkeydown="if(event.key==='Enter')confirmAddTag()" style="flex:1;font-size:13px;padding:8px 12px;border:1.5px solid var(--border2);border-radius:10px;outline:none;font-family:'DM Sans',sans-serif;color:var(--text)" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border2)'">
+      <button id="tag-modal-confirm" onclick="confirmAddTag()" style="background:var(--blue);color:#fff;border:none;border-radius:10px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif">Adicionar</button>
+    </div>
   </div>
 </div>
 
