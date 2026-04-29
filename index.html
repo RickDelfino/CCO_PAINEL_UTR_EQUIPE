@@ -117,6 +117,7 @@ html,body{min-height:100%;background:var(--bg);color:var(--text);font-family:'DM
 .chk.on{background:var(--green);border-color:var(--green)}
 .chk.on::after{content:'';display:block;width:5px;height:9px;border:2px solid #fff;border-top:none;border-left:none;transform:rotate(40deg) translateY(-1px)}
 .task-body{flex:1}
+.task-tag-badge{display:inline-flex;align-items:center;font-size:10px;font-family:'DM Mono',monospace;font-weight:600;letter-spacing:.05em;padding:2px 9px;border-radius:20px;background:var(--blue);color:#fff;text-transform:uppercase;margin-right:4px}
 .task-title{font-size:13px;color:var(--text);line-height:1.5;margin-bottom:6px;font-weight:500}
 .task-card.done .task-title{text-decoration:line-through;color:#aaa;font-weight:400}
 .task-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -746,6 +747,18 @@ select option{background:#fff}
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M13 8A5 5 0 1 1 8 3"/><path d="M8 5v3l2 1"/><path d="M11 1l2 2-2 2"/></svg>
           Histórico
         </button>
+        <div style="position:relative" id="topbar-tag-wrap">
+          <button type="button" onclick="toggleTopbarTagDropdown()" style="display:flex;align-items:center;gap:6px;padding:6px 14px;border-radius:8px;border:1px solid var(--border2);background:#fff;font-size:12px;font-weight:500;cursor:pointer;color:var(--text2);font-family:'DM Sans',sans-serif;transition:all .15s" onmouseover="this.style.borderColor='var(--blue)';this.style.color='var(--blue)'" onmouseout="this.style.borderColor='var(--border2)';this.style.color='var(--text2)'">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" style="opacity:.7"><path d="M2 3h5l5 5-5 5-5-5V3z"/><circle cx="5" cy="6" r="1" fill="currentColor" stroke="none"/></svg>
+            <span id="topbar-tag-label">Tag</span>
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6l4 4 4-4"/></svg>
+          </button>
+          <input type="hidden" id="task-tag-filter" onchange="setTaskTagFilter(this.value)">
+          <div id="topbar-tag-dropdown" style="display:none;position:fixed;z-index:9999;background:#fff;border:1.5px solid var(--border2);border-radius:12px;box-shadow:0 8px 32px rgba(45,50,119,.18);min-width:180px;padding:8px;max-height:280px;overflow-y:auto">
+            <div style="font-size:10px;font-family:'DM Mono',monospace;letter-spacing:.08em;color:var(--text3);padding:2px 4px 6px">FILTRAR POR TAG</div>
+            <div id="topbar-tag-options"></div>
+          </div>
+        </div>
       </div>
       <div class="critico-filter" id="tasks-critico-filter">
         <span class="critico-filter-label">Criticidade</span>
@@ -1103,7 +1116,8 @@ function _flattenTasks(){
   const rows = [];
   Object.entries(S.tasks||{}).forEach(([memberId, tasks]) => {
     (tasks||[]).forEach(t => rows.push({...t, memberId,
-      mentions: JSON.stringify(t.mentions||[]) }));
+      mentions: JSON.stringify(t.mentions||[]),
+      tag: t.tag||'' }));
   });
   return rows;
 }
@@ -1300,6 +1314,7 @@ function switchMember(){
   fbUnlocked=false;
   fbActiveTab="feedbacks";
   taskCriticoFilter=0;
+  taskTagFilter='';
   ovCriticoFilter=0;
   currentTaskView='list';
   currentMember=null;
@@ -1459,6 +1474,7 @@ function renderKanban(tid){
   var mentionedTasks = getAllTasksForMember(tid).filter(function(t){return t._ownerId;});
   var tasks = allTasks.concat(mentionedTasks);
   if(taskCriticoFilter>0) tasks = tasks.filter(function(t){return (t.criticidade||0)===taskCriticoFilter;});
+  if(taskTagFilter) tasks = tasks.filter(function(t){return (t.tag||'')===taskTagFilter;});
 
   // Exclude finalized tasks from kanban active view
   tasks = tasks.filter(function(t){ return !isTaskFinalized(t); });
@@ -1698,6 +1714,8 @@ function renderTasksFor(memberId){
   let mentionedTasks = allMemberTasks.filter(t=>t._ownerId);
   let tasks = allMemberTasks;
   if(taskCriticoFilter>0) tasks=tasks.filter(t=>(t.criticidade||0)===taskCriticoFilter);
+  if(taskTagFilter) tasks=tasks.filter(t=>(t.tag||'')===taskTagFilter);
+  updateTagFilterDropdown();
 
   // Update sub label
   const mentionCount = mentionedTasks.length;
@@ -1769,7 +1787,7 @@ function renderTasksFor(memberId){
       <div class="task-top">
         <div class="chk ${t.done?'on':''}" id="chk-${t.id}"></div>
         <div class="task-body">
-          <div class="task-title">${t.title}${t._ownerName?'<span style="font-size:10px;color:var(--text3);font-family:monospace;margin-left:6px;background:var(--bg);padding:1px 7px;border-radius:20px">de '+t._ownerName.split(' ')[0]+'</span>':''}</div>
+          <div class="task-title">${t.tag?'<span class="task-tag-badge">'+t.tag+'</span>':''}${t.title}${t._ownerName?'<span style="font-size:10px;color:var(--text3);font-family:monospace;margin-left:6px;background:var(--bg);padding:1px 7px;border-radius:20px">de '+t._ownerName.split(' ')[0]+'</span>':''}</div>
           ${taskMetaHtml(t, tid, dlTag, mentions, taskCanEdit)}
         </div>
       </div>
@@ -1819,10 +1837,14 @@ function renderTasksFor(memberId){
         <div style="display:flex;flex-wrap:wrap;gap:6px">${memberOpts}</div>
       </div>
       <div class="form-row"><textarea id="new-task-note" placeholder="Anotações (opcional)..." rows="2" style="flex:1;font-family:'DM Sans',sans-serif;font-size:13px;padding:8px 12px;border:1.5px solid var(--border2);border-radius:10px;outline:none;resize:vertical"></textarea></div>
-      <div class="form-row" style="align-items:center;gap:8px">
+      <div class="form-row" style="align-items:center;gap:8px;flex-wrap:wrap">
         <div class="file-input-wrap">
           <div class="file-btn" id="new-attach-btn">📎 Anexar arquivo</div>
           <input type="file" accept="image/*,.pdf" multiple onchange="previewNewAttachments(this)">
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex:1;background:var(--bg);border:1.5px solid var(--border2);border-radius:10px;padding:4px 10px;min-width:160px">
+          <span style="font-size:13px">🏷</span>
+          <input type="text" id="new-task-tag" placeholder="tags: appsheet, query..." style="flex:1;font-size:12px;border:none;background:transparent;outline:none;font-family:'DM Mono',monospace;color:var(--text2)">
         </div>
       </div>
       <div id="new-attach-preview" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
@@ -1980,6 +2002,7 @@ function createTask(mid){
   const st=document.getElementById('new-task-start');
   const critEl=document.getElementById('new-task-crit-val');
   const noteEl=document.getElementById('new-task-note');
+  const tagEl=document.getElementById('new-task-tag');
   if(!inp||!inp.value.trim())return;
   if(!S.tasks[mid])S.tasks[mid]=[];
   const mentions=Array.from(document.querySelectorAll('.new-task-mention:checked')).map(i=>i.value);
@@ -1991,6 +2014,7 @@ function createTask(mid){
     criticidade:critEl?parseInt(critEl.value)||0:0,
     mentions:mentions,
     note:noteEl?noteEl.value.trim():'',
+    tag:tagEl?tagEl.value.trim().toLowerCase():'',
     done:false,
     attachments:[...newTaskAttachments]
   };
@@ -2000,6 +2024,7 @@ function createTask(mid){
   if(st)st.value='';
   if(critEl)critEl.value='0';
   if(noteEl)noteEl.value='';
+  if(tagEl)tagEl.value='';
   newTaskAttachments=[];
 
   // Register status from timeline selector in new task form
@@ -2325,6 +2350,7 @@ function lockFb(){
 
 let fbActiveTab = 'feedbacks';
 let taskCriticoFilter = 0;
+let taskTagFilter = '';
 let ovCriticoFilter = 0;
 
 function renderFeedbacksUnlocked(){
@@ -3195,6 +3221,58 @@ function setTaskFilter(val, btn){
   document.querySelectorAll('#tasks-critico-filter .cf-btn').forEach(b=>b.classList.remove('active'));
   if(btn) btn.classList.add('active');
   renderTasks();
+}
+
+function setTaskTagFilter(val){
+  taskTagFilter = val;
+  // Update topbar label
+  const lbl = document.getElementById('topbar-tag-label');
+  if(lbl) lbl.textContent = val ? '🏷 '+val : 'Tag';
+  renderTasks();
+}
+
+function updateTagFilterDropdown(){
+  renderTopbarTagOptions();
+}
+
+function renderTopbarTagOptions(){
+  const container = document.getElementById('topbar-tag-options');
+  if(!container) return;
+  const allTasks = Object.values(S.tasks||{}).flat();
+  const tags = [...new Set(allTasks.map(t=>t.tag||'').filter(Boolean))].sort();
+  container.innerHTML =
+    `<div style="display:flex;align-items:center;gap:4px;border-radius:8px;padding:5px 6px;cursor:pointer;transition:background .1s;${!taskTagFilter?'background:#eef0fb':''}"
+      onclick="setTaskTagFilter('');toggleTopbarTagDropdown()"
+      onmouseover="this.style.background='#f4f5fb'" onmouseout="this.style.background='${!taskTagFilter?'#eef0fb':'transparent'}'">
+      <span style="flex:1;font-size:12px;font-family:'DM Sans',sans-serif;color:${!taskTagFilter?'var(--blue)':'var(--text2)'};font-weight:${!taskTagFilter?'600':'400'}">
+        ${!taskTagFilter?'✓ ':''}Todas
+      </span>
+    </div>` +
+    (tags.length === 0 ? '<div style="font-size:11px;color:var(--text3);padding:4px 6px">Nenhuma tag nas tarefas.</div>' :
+    tags.map(tag => `
+      <div style="display:flex;align-items:center;gap:4px;border-radius:8px;padding:5px 6px;cursor:pointer;transition:background .1s;${tag===taskTagFilter?'background:#eef0fb':''}"
+        onclick="setTaskTagFilter('${tag}');toggleTopbarTagDropdown()"
+        onmouseover="this.style.background='#f4f5fb'" onmouseout="this.style.background='${tag===taskTagFilter?'#eef0fb':'transparent'}'">
+        <span style="flex:1;font-size:12px;font-family:'DM Mono',monospace;color:${tag===taskTagFilter?'var(--blue)':'var(--text2)'};font-weight:${tag===taskTagFilter?'600':'400'}">
+          ${tag===taskTagFilter?'✓ ':''}${tag}
+        </span>
+      </div>
+    `).join(''));
+}
+
+function toggleTopbarTagDropdown(){
+  const btn = document.querySelector('#topbar-tag-wrap button');
+  const dd  = document.getElementById('topbar-tag-dropdown');
+  if(!dd) return;
+  const isOpen = dd.style.display !== 'none';
+  closeAllTagDropdowns();
+  if(!isOpen){
+    const rect = btn.getBoundingClientRect();
+    dd.style.top  = (rect.bottom + 6) + 'px';
+    dd.style.left = rect.left + 'px';
+    dd.style.display = 'block';
+    renderTopbarTagOptions();
+  }
 }
 
 function setOvFilter(val, btn){
@@ -5578,6 +5656,7 @@ function openTaskEditModal(tid, mid){
   document.getElementById('te-start').value = task.startDate||'';
   document.getElementById('te-dl').value = task.deadline||'';
   document.getElementById('te-note').value = task.note||'';
+  initTeTagDropdown(task.tag||'');
   var critEl = document.getElementById('te-crit');
   if(critEl) critEl.value = String(task.criticidade||0);
 
@@ -5628,6 +5707,8 @@ function submitTaskEdit(){
   if(dlEl) t.deadline=dlEl.value;
   if(noteEl) t.note=noteEl.value;
   if(critEl) t.criticidade=parseInt(critEl.value)||0;
+  var tagEl=document.getElementById('te-tag');
+  if(tagEl) t.tag=tagEl.value.trim().toLowerCase();
   t.mentions=Array.from(document.querySelectorAll('.te-mention:checked')).map(function(i){return i.value;});
   closeTaskEditModal();
   saveState(); render();
@@ -5648,6 +5729,7 @@ let ntAttachments = [];
 function openNewTaskModal(mid){
   ntCurrentMid = mid || currentMember;
   ntAttachments = [];
+  initNtTagDropdown();
   // Populate status select
   const sel = document.getElementById('nt-stl-sel');
   if(sel){
@@ -5692,7 +5774,9 @@ function openNewTaskModal(mid){
     });
   }
   // Clear fields
-  ['nt-input','nt-note','nt-stl-note'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+  ['nt-input','nt-note','nt-stl-note','nt-tag'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+  closeAllTagDropdowns();
+  initNtTagDropdown();
   ['nt-start','nt-dl'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
   const crit = document.getElementById('nt-crit'); if(crit) crit.value='0';
   const prev = document.getElementById('nt-attach-preview'); if(prev) prev.innerHTML='';
@@ -5735,6 +5819,7 @@ function submitNewTaskModal(){
   const st = document.getElementById('nt-start');
   const dl = document.getElementById('nt-dl');
   const note = null; // merged into description
+  const tagEl = document.getElementById('nt-tag');
   const newTask = {
     id:'t'+Date.now(),
     title: inp.value.trim(),
@@ -5742,7 +5827,8 @@ function submitNewTaskModal(){
     deadline: dl?dl.value:'',
     criticidade: crit?parseInt(crit.value)||0:0,
     mentions: mentions,
-    note: '',  // no separate note field
+    note: '',
+    tag: tagEl?tagEl.value.trim():'',
     done: false,
     attachments: [...ntAttachments]
   };
@@ -5930,6 +6016,91 @@ function viviConfirmFinalize(tid, mid){
   }, 150);
 }
 
+// ── TAG SYSTEM (native select) ────────────────────────────────
+
+function getGlobalTags(){
+  if(!S.globalTags) S.globalTags = ['AppSheet','Dataflow','Query','Allowance','Bug','Melhoria'];
+  return S.globalTags;
+}
+
+function populateTagSelect(selectId, currentVal){
+  const sel = document.getElementById(selectId);
+  if(!sel) return;
+  const tags = getGlobalTags();
+  const emptyLabel = selectId === 'te-tag' ? '🏷 Tag (nenhuma)' : '🏷 Tag';
+  sel.innerHTML = `<option value="">${emptyLabel}</option>` +
+    tags.map(t => `<option value="${t}"${t===currentVal?' selected':''}>${t}</option>`).join('') +
+    `<option value="__add__">➕ Nova tag...</option>` +
+    (tags.length > 0 ? `<option value="__delete__">🗑 Remover uma tag...</option>` : '');
+}
+
+function onNtTagChange(sel){
+  if(sel.value === '__add__'){ promptAddTag('nt-tag'); return; }
+  if(sel.value === '__delete__'){ promptDeleteTag('nt-tag'); return; }
+  updateTagFilterDropdown();
+}
+
+function onTeTagChange(sel){
+  if(sel.value === '__add__'){ promptAddTag('te-tag'); return; }
+  if(sel.value === '__delete__'){ promptDeleteTag('te-tag'); return; }
+}
+
+function promptAddTag(selectId){
+  const name = prompt('Nome da nova tag:');
+  if(!name || !name.trim()) { populateTagSelect(selectId, ''); return; }
+  const tag = name.trim();
+  if(!S.globalTags) S.globalTags = [];
+  if(!S.globalTags.includes(tag)) { S.globalTags.push(tag); saveState(); }
+  populateTagSelect(selectId, tag);
+  const sel = document.getElementById(selectId);
+  if(sel) sel.value = tag;
+  updateTagFilterDropdown();
+}
+
+function promptDeleteTag(selectId){
+  const tags = getGlobalTags();
+  if(!tags.length){ alert('Nenhuma tag para remover.'); populateTagSelect(selectId,''); return; }
+  const name = prompt('Qual tag deseja remover?\n\n' + tags.map((t,i)=>`${i+1}. ${t}`).join('\n') + '\n\nDigite o nome exato:');
+  if(!name || !name.trim()){ populateTagSelect(selectId, document.getElementById(selectId)?.dataset?.current||''); return; }
+  const tag = name.trim();
+  if(!S.globalTags.includes(tag)){ alert('Tag não encontrada.'); populateTagSelect(selectId,''); return; }
+  S.globalTags = S.globalTags.filter(t => t !== tag);
+  saveState();
+  populateTagSelect(selectId, '');
+  updateTagFilterDropdown();
+}
+
+function initNtTagDropdown(){
+  populateTagSelect('nt-tag', '');
+}
+
+function initTeTagDropdown(currentTag){
+  populateTagSelect('te-tag', currentTag||'');
+}
+
+function closeAllTagDropdowns(){ /* no-op — native selects */ }
+function toggleNtTagDropdown(){}
+function toggleTeTagDropdown(){}
+function toggleTopbarTagDropdown(){
+  const btn = document.querySelector('#topbar-tag-wrap button');
+  const dd  = document.getElementById('topbar-tag-dropdown');
+  if(!dd) return;
+  const isOpen = dd.style.display !== 'none';
+  if(isOpen){ dd.style.display='none'; return; }
+  const rect = btn.getBoundingClientRect();
+  dd.style.top  = (rect.bottom + 6) + 'px';
+  dd.style.left = rect.left + 'px';
+  dd.style.display = 'block';
+  renderTopbarTagOptions();
+}
+
+document.addEventListener('click', function(e){
+  if(!e.target.closest('#topbar-tag-wrap')){
+    const dd = document.getElementById('topbar-tag-dropdown');
+    if(dd) dd.style.display = 'none';
+  }
+});
+
 // INIT
 loadState();
 renderMemberScreen();
@@ -6062,6 +6233,11 @@ renderMemberScreen();
       <div style="background:rgba(255,255,255,.82);backdrop-filter:blur(40px);-webkit-backdrop-filter:blur(40px);border:1px solid rgba(255,255,255,.7);border-radius:14px;padding:1rem 1.1rem;box-shadow:0 2px 8px rgba(45,50,119,.06)">
         <div style="font-size:10px;font-family:'DM Mono',monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);margin-bottom:6px">Anotações</div>
         <textarea id="te-note" rows="2" style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.5);border:1.5px solid rgba(45,50,119,.15);border-radius:9px;padding:8px 11px;font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text);outline:none;resize:vertical" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='rgba(45,50,119,.15)'"></textarea>
+        <div style="margin-top:8px" id="te-tag-wrap">
+          <select id="te-tag" onchange="onTeTagChange(this)" style="width:100%;padding:7px 11px;background:rgba(255,255,255,.5);border:1.5px solid rgba(45,50,119,.15);border-radius:9px;font-family:'DM Sans',sans-serif;font-size:12px;color:var(--text);outline:none;cursor:pointer" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='rgba(45,50,119,.15)'">
+            <option value="">🏷 Tag (nenhuma)</option>
+          </select>
+        </div>
       </div>
 
       <div style="background:rgba(255,255,255,.82);backdrop-filter:blur(40px);-webkit-backdrop-filter:blur(40px);border:1px solid rgba(255,255,255,.7);border-radius:14px;padding:1rem 1.1rem;box-shadow:0 2px 8px rgba(45,50,119,.06)">
@@ -6107,6 +6283,11 @@ renderMemberScreen();
             Imagem
             <input type="file" accept="image/*" multiple onchange="previewNtAttachments(this)" style="display:none">
           </label>
+          <div style="position:relative;display:inline-flex;align-items:center" id="nt-tag-wrap">
+            <select id="nt-tag" onchange="onNtTagChange(this)" style="display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:20px;border:1px solid rgba(45,50,119,.15);background:rgba(255,255,255,.6);color:var(--blue);font-size:11px;font-weight:500;font-family:'DM Sans',sans-serif;cursor:pointer;outline:none;appearance:auto">
+              <option value="">🏷 Tag</option>
+            </select>
+          </div>
         </div>
         <div id="nt-attach-preview" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px"></div>
       </div>
